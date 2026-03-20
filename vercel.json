@@ -1,4 +1,7 @@
 {
+  "functions": {
+    "api/social-scout.js": { "maxDuration": 60 }
+  },
   "crons": [
     {
       "path": "/api/brief",

@@ -63,15 +63,14 @@ export default async function handler(req, res) {
   console.log(`[${AGENT_NAME}] v${AGENT_VERSION} starting — runId: ${runId}`);
 
   try {
+    // Search all geo groups in parallel (avoids sequential timeout)
+    const results = await Promise.allSettled(GEO_GROUPS.map(group => searchGeoGroup(group)));
     const allFindings = [];
-
-    // Search each geo group with one batched Gemini call
-    for (const group of GEO_GROUPS) {
-      try {
-        const findings = await searchGeoGroup(group);
-        allFindings.push(...findings);
-      } catch (e) {
-        console.error(`[${AGENT_NAME}] Error searching geo ${group.geo}:`, e.message);
+    for (const [i, result] of results.entries()) {
+      if (result.status === 'fulfilled') {
+        allFindings.push(...result.value);
+      } else {
+        console.error(`[${AGENT_NAME}] Error searching geo ${GEO_GROUPS[i].geo}:`, result.reason?.message);
       }
     }
 
