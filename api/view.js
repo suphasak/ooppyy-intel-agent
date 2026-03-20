@@ -382,7 +382,7 @@ ${recentHTML}
 
 <div class="footer">
   Ooppyy · Market Intelligence Agent${agentVersion ? ` v${agentVersion}` : ''}<br>
-  <a href="/api/view">ooppyy-intel-agent.vercel.app</a>
+  <a href="/api/view">Daily Brief</a> · <a href="/api/scout">Social Scout</a>
 </div>
 
 <div class="toast" id="toast">✅ Link copied!</div>
