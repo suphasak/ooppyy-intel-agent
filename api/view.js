@@ -11,9 +11,9 @@ export default async function handler(req, res) {
     const childPages = data.results.filter(b => b.type === 'child_page');
     if (!childPages.length) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
 
-    // idx=0 → latest, idx=1 → yesterday, etc.
-    const idx = Math.max(0, Math.min(parseInt(req.query?.idx || '0'), childPages.length - 1));
-    const page = childPages[childPages.length - 1 - idx];
+    // Always show the latest brief only (last child page)
+    const idx = 0;
+    const page = childPages[childPages.length - 1];
 
     // Fetch blocks of the selected brief
     const br = await fetch(
@@ -33,7 +33,7 @@ export default async function handler(req, res) {
 
     if (!briefData) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
 
-    const html = renderHTML(briefData, idx, childPages.length);
+    const html = renderHTML(briefData);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=900');
     res.status(200).send(html);
@@ -48,10 +48,8 @@ function e(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function renderHTML(data, idx, totalBriefs) {
+function renderHTML(data) {
   const { date, sections = [], opportunities = [], briefNum, agentVersion, sourcesUsed = [] } = data;
-  const hasNext = idx > 0;
-  const hasPrev = idx < totalBriefs - 1;
 
   const tabs = [
     { key: 'all', label: 'All', emoji: '⚡' },
@@ -130,11 +128,6 @@ function renderHTML(data, idx, totalBriefs) {
     .agent-pill{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:5px 12px 5px 8px;font-size:.75rem;font-weight:700;letter-spacing:.04em}
     .live{width:7px;height:7px;border-radius:50%;background:#30d158;box-shadow:0 0 6px #30d158;animation:pulse 2s infinite}
     @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
-    .nav-btns{display:flex;align-items:center;gap:6px}
-    .nav-btn{background:rgba(255,255,255,.1);border:none;color:#0a84ff;font-size:.85rem;font-weight:700;width:30px;height:30px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center}
-    .nav-btn:disabled{color:var(--txt2);background:rgba(255,255,255,.04);cursor:default}
-    .nav-btn:active:not(:disabled){background:rgba(255,255,255,.18)}
-    .nav-label{font-size:.72rem;color:var(--txt2);min-width:40px;text-align:center}
     .share-btn{background:rgba(10,132,255,.15);border:1px solid rgba(10,132,255,.3);color:#0a84ff;font-size:.78rem;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;display:flex;align-items:center;gap:5px}
     .share-btn:active{opacity:.6}
 
@@ -199,11 +192,6 @@ function renderHTML(data, idx, totalBriefs) {
 <div class="topbar">
   <div class="topbar-row">
     <div class="agent-pill"><div class="live"></div>Ooppyy · Market Intelligence</div>
-    <div class="nav-btns">
-      <button class="nav-btn" onclick="navigate(1)" ${!hasPrev ? 'disabled' : ''} title="Previous brief">‹</button>
-      <span class="nav-label">${idx === 0 ? 'Today' : idx === 1 ? 'Yesterday' : `${idx}d ago`}</span>
-      <button class="nav-btn" onclick="navigate(-1)" ${!hasNext ? 'disabled' : ''} title="Newer brief">›</button>
-    </div>
     <button class="share-btn" onclick="share()">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
       Share
@@ -229,15 +217,12 @@ function renderHTML(data, idx, totalBriefs) {
 
 <div class="footer">
   Ooppyy · Market Intelligence Agent${agentVersion ? ` v${agentVersion}` : ''}<br>
-  <a href="/api/view">ooppyy-intel-agent.vercel.app</a> · ${totalBriefs} brief${totalBriefs !== 1 ? 's' : ''} total
+  <a href="/api/view">ooppyy-intel-agent.vercel.app</a>
 </div>
 
 <div class="toast" id="toast">✅ Link copied!</div>
 
 <script>
-  const CURRENT_IDX = ${idx};
-  const TOTAL = ${totalBriefs};
-
   function toggle(el) { el.classList.toggle('open'); }
 
   function setTab(key) {
@@ -245,12 +230,6 @@ function renderHTML(data, idx, totalBriefs) {
     document.querySelectorAll('.section').forEach(s => {
       s.classList.toggle('hidden', key !== 'all' && s.dataset.section !== key);
     });
-  }
-
-  function navigate(dir) {
-    const next = CURRENT_IDX + dir;
-    if (next < 0 || next >= TOTAL) return;
-    window.location.href = '/api/view?idx=' + next;
   }
 
   function share() {

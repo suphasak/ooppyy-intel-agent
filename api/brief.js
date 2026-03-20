@@ -1,4 +1,4 @@
-const AGENT_VERSION = '1.3';
+const AGENT_VERSION = '1.4';
 const AGENT_NAME = 'Market Intelligence Agent';
 
 export default async function handler(req, res) {
@@ -111,7 +111,8 @@ Output ONLY valid JSON (no markdown, no text before or after). Use exactly this 
           "headline": "Story headline in 1 sentence",
           "source_url": "paste exact URL from above or empty string",
           "source_name": "Publication name",
-          "sowhat": "1-2 sentences — specific implication for fashion/beauty distribution in SEA/India/GCC or AI consulting in Singapore"
+          "sowhat": "ONE sentence — implication for fashion/beauty in SEA/India/GCC or AI consulting SG",
+          "virality": 8
         }
       ]
     },
@@ -120,34 +121,34 @@ Output ONLY valid JSON (no markdown, no text before or after). Use exactly this 
       "label": "MARKETS & ECONOMICS",
       "emoji": "📈",
       "color": "#22c55e",
-      "stories": [...]
+      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":7}]
     },
     {
       "key": "tech",
       "label": "TECHNOLOGY & AI",
       "emoji": "💻",
       "color": "#a855f7",
-      "stories": [...]
+      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":6}]
     },
     {
       "key": "fashion",
       "label": "FASHION & BEAUTY",
       "emoji": "👗",
       "color": "#ec4899",
-      "stories": [...]
+      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":5}]
     }
   ],
   "opportunities": [
-    "Actionable opportunity or threat #1",
-    "Actionable opportunity or threat #2",
-    "Actionable opportunity or threat #3"
+    "Actionable item #1 (max 12 words)",
+    "Actionable item #2 (max 12 words)"
   ]
 }
 
 Rules:
-- 2 stories per section
-- sowhat must mention SEA/India/GCC or Singapore AI consulting specifically
-- source_url must be a real URL from the headlines above, or empty string ""
+- 2 stories per section (8 total)
+- sowhat is ONE sentence max
+- source_url must be a real URL from above, or ""
+- virality 1-10: global impact + market relevance + how widely discussed today
 - Output raw JSON only, nothing else`;
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -188,60 +189,47 @@ function escHTML(s) {
 }
 
 async function sendToTelegram(briefData) {
-  const { date, sections, opportunities } = briefData;
+  const { sections = [], opportunities = [], briefNum } = briefData;
   const shortDate = new Date().toLocaleDateString('en-SG', {
-    timeZone: 'Asia/Singapore', month: 'short', day: 'numeric'
+    timeZone: 'Asia/Singapore', weekday: 'short', month: 'short', day: 'numeric'
   });
 
-  let msg = `🌅 <b>OOPPYY INTEL BRIEF — ${shortDate}</b>\n`;
-  msg += `──────────────────────────\n\n`;
+  // Flatten all stories, sort by virality score desc, take top 5
+  const allStories = sections.flatMap(s =>
+    (s.stories || []).map(story => ({ ...story, emoji: s.emoji }))
+  ).sort((a, b) => (b.virality || 0) - (a.virality || 0)).slice(0, 5);
 
-  for (const section of (sections || [])) {
-    msg += `${section.emoji} <b>${escHTML(section.label)}</b>\n\n`;
-    for (const story of (section.stories || []).slice(0, 2)) {
-      msg += `📌 <b>${escHTML(story.headline)}</b>\n`;
-      if (story.source_url) msg += `🔗 <a href="${story.source_url}">${escHTML(story.source_name || 'Source')}</a>\n`;
-      if (story.sowhat) msg += `💡 <i>${escHTML(story.sowhat)}</i>\n`;
-      msg += '\n';
-    }
+  let msg = `🌅 <b>Brief #${briefNum || '?'} · ${shortDate}</b>\n\n`;
+
+  for (const story of allStories) {
+    const viralityBar = '🔥'.repeat(Math.round((story.virality || 5) / 3));
+    msg += `${story.emoji} <b>${escHTML(story.headline)}</b>\n`;
+    msg += `↳ ${escHTML(story.sowhat)}`;
+    if (story.source_url) msg += ` <a href="${story.source_url}">↗</a>`;
+    msg += ` ${viralityBar}\n\n`;
   }
 
   if (opportunities?.length) {
-    msg += `🎯 <b>OPPORTUNITIES &amp; THREATS</b>\n`;
-    opportunities.forEach(o => { msg += `• ${escHTML(o)}\n`; });
+    msg += `🎯 ${escHTML(opportunities[0])}\n`;
+    if (opportunities[1]) msg += `🎯 ${escHTML(opportunities[1])}\n`;
     msg += '\n';
   }
 
-  msg += `──────────────────────────\n`;
-  msg += `📊 <a href="https://ooppyy-intel-agent.vercel.app/api/view">Open full brief →</a>`;
+  msg += `<a href="https://ooppyy-intel-agent.vercel.app/api/view">Full brief →</a>`;
 
-  const chunks = [];
-  if (msg.length <= 4000) {
-    chunks.push(msg);
-  } else {
-    let cur = '';
-    for (const line of msg.split('\n')) {
-      if ((cur + '\n' + line).length > 4000) { chunks.push(cur); cur = line; }
-      else { cur = cur ? cur + '\n' + line : line; }
-    }
-    if (cur) chunks.push(cur);
-  }
-
-  for (const chunk of chunks) {
-    const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: process.env.TELEGRAM_CHAT_ID,
-        text: chunk,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true
-      })
-    });
-    if (!r.ok) {
-      const err = await r.json();
-      throw new Error(`Telegram error: ${JSON.stringify(err)}`);
-    }
+  const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: process.env.TELEGRAM_CHAT_ID,
+      text: msg,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
+    })
+  });
+  if (!r.ok) {
+    const err = await r.json();
+    throw new Error(`Telegram error: ${JSON.stringify(err)}`);
   }
 }
 
