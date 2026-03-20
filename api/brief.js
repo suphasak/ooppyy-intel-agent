@@ -1,10 +1,16 @@
-const AGENT_VERSION = '1.5';
+const AGENT_VERSION = '1.6';
 const AGENT_NAME = 'Market Intelligence Agent';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 export default async function handler(req, res) {
   try {
+    // Idempotency: skip if brief already exists for today
+    const alreadyRan = await checkTodayBriefExists();
+    if (alreadyRan) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'Brief already exists for today' });
+    }
+
     const briefNum = await getNextBriefNumber();
     const news = await fetchAllNews();
     const briefData = await generateBrief(news, briefNum);
@@ -13,11 +19,27 @@ export default async function handler(req, res) {
       saveToNotion(briefData),
       saveToSupabase(briefData),
     ]);
+    await updateBriefTracker(briefData);
     res.status(200).json({ success: true, brief: briefNum });
   } catch (error) {
     console.error('Brief error:', error);
     res.status(500).json({ error: error.message });
   }
+}
+
+async function checkTodayBriefExists() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return false;
+  try {
+    const today = new Date().toLocaleDateString('en-SG', {
+      timeZone: 'Asia/Singapore', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+    });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/briefs?date=eq.${encodeURIComponent(today)}&select=brief_num`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    if (!r.ok) return false;
+    const data = await r.json();
+    return Array.isArray(data) && data.length > 0;
+  } catch { return false; }
 }
 
 async function getNextBriefNumber() {
@@ -332,6 +354,45 @@ async function saveToNotion(briefData) {
     const err = await r.json();
     throw new Error(`Notion error: ${JSON.stringify(err)}`);
   }
+}
+
+async function updateBriefTracker(briefData) {
+  try {
+    const { briefNum, date, agentVersion, sections = [] } = briefData;
+    const storyCount = sections.reduce((n, s) => n + (s.stories || []).length, 0);
+
+    // Find the Brief Tracker child page under the parent
+    const listR = await fetch(
+      `https://api.notion.com/v1/blocks/${process.env.NOTION_PAGE_ID}/children?page_size=100`,
+      { headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' } }
+    );
+    const listData = await listR.json();
+    const trackerBlock = (listData.results || []).find(b =>
+      b.type === 'child_page' && (b.child_page?.title || '').toLowerCase().includes('tracker')
+    );
+    if (!trackerBlock) return;
+
+    // Append a new run entry to the tracker page
+    await fetch(`https://api.notion.com/v1/blocks/${trackerBlock.id}/children`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${process.env.NOTION_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Notion-Version': '2022-06-28'
+      },
+      body: JSON.stringify({
+        children: [{
+          object: 'block', type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              { type: 'text', text: { content: `✅ Brief #${briefNum}` }, annotations: { bold: true, color: 'green' } },
+              { type: 'text', text: { content: `  ·  ${date}  ·  v${agentVersion}  ·  ${storyCount} stories` } }
+            ]
+          }
+        }]
+      })
+    });
+  } catch { /* tracker update is non-critical, never block the brief */ }
 }
 
 async function saveToSupabase(briefData) {
