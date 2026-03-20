@@ -1,4 +1,4 @@
-const AGENT_VERSION = '1.0';
+const AGENT_VERSION = '1.1';
 const AGENT_NAME = 'Social Scout';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -112,7 +112,7 @@ export default async function handler(req, res) {
   }
 }
 
-// ── Gemini search ─────────────────────────────────────────────────────────────
+// ── Groq search (compound-beta — built-in web search) ─────────────────────────
 
 async function searchGeoGroup(group) {
   const { geo, brands } = group;
@@ -122,7 +122,7 @@ async function searchGeoGroup(group) {
 
   const prompt = `You are a fashion industry intelligence analyst. Today is ${getSGTDateLabel()}.
 
-Search for the LATEST news and developments (past 7 days) for these brands operating in ${geo}:
+Search the web for the LATEST news and developments (past 7 days) for these brands operating in ${geo}:
 ${brandList}
 
 For each brand, look for these signal types:
@@ -149,27 +149,28 @@ Rules:
 Example output:
 [{"brand":"Keds","geo":"GCC","headline":"Keds launches sustainable canvas line across UAE retail","summary":"New eco-line targets millennial shoppers in three UAE flagship stores.","signal_type":"launch","score":8,"source_url":"https://example.com/keds-uae"}]`;
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        tools: [{ google_search: {} }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
-      }),
-      signal: AbortSignal.timeout(45000),
-    }
-  );
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'compound-beta',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      max_tokens: 2048,
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Gemini API error (${response.status}): ${err.substring(0, 300)}`);
+    throw new Error(`Groq API error (${response.status}): ${err.substring(0, 300)}`);
   }
 
   const data = await response.json();
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+  const rawText = data?.choices?.[0]?.message?.content || '[]';
 
   // Strip markdown code fences if present
   const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
