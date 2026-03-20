@@ -1,13 +1,18 @@
-const AGENT_VERSION = '1.4';
+const AGENT_VERSION = '1.5';
 const AGENT_NAME = 'Market Intelligence Agent';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 export default async function handler(req, res) {
   try {
     const briefNum = await getNextBriefNumber();
     const news = await fetchAllNews();
     const briefData = await generateBrief(news, briefNum);
-    await sendToTelegram(briefData);
-    await saveToNotion(briefData);
+    await Promise.all([
+      sendToTelegram(briefData),
+      saveToNotion(briefData),
+      saveToSupabase(briefData),
+    ]);
     res.status(200).json({ success: true, brief: briefNum });
   } catch (error) {
     console.error('Brief error:', error);
@@ -326,5 +331,65 @@ async function saveToNotion(briefData) {
   if (!r.ok) {
     const err = await r.json();
     throw new Error(`Notion error: ${JSON.stringify(err)}`);
+  }
+}
+
+async function saveToSupabase(briefData) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return; // Skip if not configured
+
+  const { briefNum, date, agentVersion, sections = [], opportunities = [], generatedAt } = briefData;
+  const storyCount = sections.reduce((n, s) => n + (s.stories || []).length, 0);
+
+  const headers = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+  };
+
+  // Insert brief record
+  const briefRes = await fetch(`${SUPABASE_URL}/rest/v1/briefs`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      brief_num: briefNum,
+      date,
+      agent_version: agentVersion,
+      story_count: storyCount,
+      sections,
+      opportunities,
+      generated_at: generatedAt || new Date().toISOString()
+    })
+  });
+
+  if (!briefRes.ok) {
+    const err = await briefRes.text();
+    console.error('Supabase briefs error:', err);
+    return;
+  }
+
+  // Insert individual stories (for analytics/querying)
+  const stories = sections.flatMap(s =>
+    (s.stories || []).map(story => ({
+      brief_num: briefNum,
+      section_key: s.key,
+      section_label: s.label,
+      headline: story.headline,
+      sowhat: story.sowhat,
+      source_url: story.source_url || null,
+      source_name: story.source_name || null,
+      virality: story.virality || null
+    }))
+  );
+
+  if (stories.length) {
+    const storiesRes = await fetch(`${SUPABASE_URL}/rest/v1/stories`, {
+      method: 'POST',
+      headers: { ...headers, 'Prefer': 'return=minimal' },
+      body: JSON.stringify(stories)
+    });
+    if (!storiesRes.ok) {
+      console.error('Supabase stories error:', await storiesRes.text());
+    }
   }
 }

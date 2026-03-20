@@ -3,7 +3,7 @@
 ## Identity
 - **Name:** Ooppyy — Market Intelligence Agent
 - **Type:** Scheduled Research Agent
-- **Agent Version:** 1.4
+- **Agent Version:** 1.5
 - **Status:** Active
 - **Deployed:** Vercel (ooppyy-intel-agent.vercel.app)
 
@@ -78,6 +78,7 @@ The "So What" angle is always tailored to:
 | Knowledge base | Notion API | Free |
 | Delivery | Telegram Bot API | Free |
 | Hosting | Vercel Hobby | Free |
+| Data storage | Supabase (PostgreSQL) | Free |
 | **Total** | | **$0/month** |
 
 ---
@@ -90,6 +91,7 @@ The "So What" angle is always tailored to:
 | v1.2 | 2026-03-20 | Added source links, icons, HTML view page |
 | v1.3 | 2026-03-20 | JSON output, iOS widget UI, section tabs, date nav, PM Notion structure |
 | v1.4 | 2026-03-20 | Virality scoring, compact single Telegram message, latest-only webapp, Notion Brief Tracker index page, old briefs retroactively renamed |
+| v1.5 | 2026-03-20 | Supabase integration — briefs + stories stored in PostgreSQL for analytics and dashboards |
 
 ---
 
