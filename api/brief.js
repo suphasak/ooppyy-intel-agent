@@ -1,14 +1,30 @@
+const AGENT_VERSION = '1.3';
+const AGENT_NAME = 'Market Intelligence Agent';
+
 export default async function handler(req, res) {
   try {
+    const briefNum = await getNextBriefNumber();
     const news = await fetchAllNews();
-    const briefData = await generateBrief(news);
+    const briefData = await generateBrief(news, briefNum);
     await sendToTelegram(briefData);
     await saveToNotion(briefData);
-    res.status(200).json({ success: true });
+    res.status(200).json({ success: true, brief: briefNum });
   } catch (error) {
     console.error('Brief error:', error);
     res.status(500).json({ error: error.message });
   }
+}
+
+async function getNextBriefNumber() {
+  try {
+    const r = await fetch(
+      `https://api.notion.com/v1/blocks/${process.env.NOTION_PAGE_ID}/children?page_size=100`,
+      { headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' } }
+    );
+    const data = await r.json();
+    const count = (data.results || []).filter(b => b.type === 'child_page').length;
+    return count + 1;
+  } catch { return 1; }
 }
 
 const FEEDS = [
@@ -59,7 +75,7 @@ async function fetchAllNews() {
   return results;
 }
 
-async function generateBrief(news) {
+async function generateBrief(news, briefNum) {
   const date = new Date().toLocaleDateString('en-SG', {
     timeZone: 'Asia/Singapore',
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
@@ -159,6 +175,11 @@ Rules:
     throw new Error(`JSON parse failed: ${data.choices[0].message.content.substring(0, 200)}`);
   }
 
+  parsed.briefNum = briefNum;
+  parsed.agentVersion = AGENT_VERSION;
+  parsed.agentName = AGENT_NAME;
+  parsed.generatedAt = new Date().toISOString();
+  parsed.sourcesUsed = ['BBC World', 'BBC Business', 'BBC Tech', 'TechCrunch', 'WWD', 'FashionUnited'];
   return parsed;
 }
 
@@ -225,37 +246,75 @@ async function sendToTelegram(briefData) {
 }
 
 async function saveToNotion(briefData) {
-  const date = briefData.date || new Date().toLocaleDateString('en-SG', {
-    timeZone: 'Asia/Singapore',
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-  });
+  const { date, briefNum, agentVersion, agentName, generatedAt, sourcesUsed, sections = [], opportunities = [] } = briefData;
 
-  // Store compact JSON in code blocks (split into 1900-char chunks)
+  const storiesCount = sections.reduce((n, s) => n + (s.stories || []).length, 0);
+  const sgTime = new Date(generatedAt).toLocaleString('en-SG', { timeZone: 'Asia/Singapore', hour: '2-digit', minute: '2-digit' });
+
+  // Split JSON into 1900-char chunks for code blocks
   const jsonStr = JSON.stringify(briefData);
   const jsonChunks = [];
-  for (let i = 0; i < jsonStr.length; i += 1900) {
-    jsonChunks.push(jsonStr.slice(i, i + 1900));
-  }
+  for (let i = 0; i < jsonStr.length; i += 1900) jsonChunks.push(jsonStr.slice(i, i + 1900));
+
+  const metadataRow = (label, value) => ({
+    object: 'block', type: 'paragraph',
+    paragraph: { rich_text: [
+      { type: 'text', text: { content: `${label}  ` }, annotations: { bold: true } },
+      { type: 'text', text: { content: value } }
+    ]}
+  });
 
   const blocks = [
-    // JSON data blocks (for view.js to render HTML)
+    // ── METADATA CALLOUT (PM at-a-glance) ──
+    {
+      object: 'block', type: 'callout',
+      callout: {
+        icon: { type: 'emoji', emoji: '📋' },
+        color: 'blue_background',
+        rich_text: [{ type: 'text', text: { content: `Brief #${briefNum}  ·  Agent ${agentName} v${agentVersion}  ·  ${storiesCount} stories  ·  ${sourcesUsed.length} sources  ·  Generated ${sgTime} SGT` } }]
+      }
+    },
+    metadataRow('📅 Date:', date),
+    metadataRow('🔢 Brief #:', `${briefNum}`),
+    metadataRow('🤖 Agent Version:', `v${agentVersion}`),
+    metadataRow('📰 Sources:', sourcesUsed.join(', ')),
+    metadataRow('📊 Stories covered:', `${storiesCount} across ${sections.length} sections`),
+    metadataRow('🌐 HTML View:', `https://ooppyy-intel-agent.vercel.app/api/view`),
+    { object: 'block', type: 'divider', divider: {} },
+
+    // ── JSON DATA (for view.js) ──
     ...jsonChunks.map(chunk => ({
       object: 'block', type: 'code',
       code: { language: 'json', rich_text: [{ type: 'text', text: { content: chunk } }] }
     })),
-    // Human-readable text blocks below
     { object: 'block', type: 'divider', divider: {} },
-    ...((briefData.sections || []).flatMap(section => [
-      { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: `${section.emoji} ${section.label}` } }] } },
+
+    // ── HUMAN-READABLE SECTIONS ──
+    ...sections.flatMap(section => [
+      {
+        object: 'block', type: 'heading_2',
+        heading_2: { rich_text: [{ type: 'text', text: { content: `${section.emoji} ${section.label}` } }] }
+      },
       ...(section.stories || []).flatMap(story => [
-        { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `📌 ${story.headline}` }, annotations: { bold: true } }] } },
-        ...(story.source_url ? [{ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `🔗 ${story.source_url}` } }] } }] : []),
-        { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `💡 So What: ${story.sowhat}` } }] } },
+        {
+          object: 'block', type: 'paragraph',
+          paragraph: { rich_text: [{ type: 'text', text: { content: `📌 ${story.headline}` }, annotations: { bold: true } }] }
+        },
+        ...(story.source_url ? [{
+          object: 'block', type: 'paragraph',
+          paragraph: { rich_text: [{ type: 'text', text: { content: `🔗 Source: ${story.source_name || ''} — ${story.source_url}` }, annotations: { color: 'blue' } }] }
+        }] : []),
+        {
+          object: 'block', type: 'quote',
+          quote: { rich_text: [{ type: 'text', text: { content: `💡 So What: ${story.sowhat}` } }] }
+        }
       ])
-    ])),
-    ...(briefData.opportunities?.length ? [
-      { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: '🎯 OPPORTUNITIES & THREATS' } }] } },
-      ...briefData.opportunities.map(o => ({
+    ]),
+
+    // ── OPPORTUNITIES ──
+    ...(opportunities.length ? [
+      { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ type: 'text', text: { content: '🎯 Opportunities & Threats' } }] } },
+      ...opportunities.map(o => ({
         object: 'block', type: 'bulleted_list_item',
         bulleted_list_item: { rich_text: [{ type: 'text', text: { content: o } }] }
       }))
@@ -271,7 +330,7 @@ async function saveToNotion(briefData) {
     },
     body: JSON.stringify({
       parent: { page_id: process.env.NOTION_PAGE_ID },
-      properties: { title: { title: [{ text: { content: `📰 Intel Brief — ${date}` } }] } },
+      properties: { title: { title: [{ text: { content: `📰 Brief #${briefNum} — ${date} [Agent v${agentVersion}]` } }] } },
       children: blocks.slice(0, 100)
     })
   });
