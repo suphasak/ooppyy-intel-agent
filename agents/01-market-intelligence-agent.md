@@ -3,7 +3,7 @@
 ## Identity
 - **Name:** Ooppyy — Market Intelligence Agent
 - **Type:** Scheduled Research Agent
-- **Agent Version:** 1.6
+- **Agent Version:** 1.7
 - **Status:** Active
 - **Deployed:** Vercel (ooppyy-intel-agent.vercel.app)
 
@@ -93,6 +93,7 @@ The "So What" angle is always tailored to:
 | v1.4 | 2026-03-20 | Virality scoring, compact single Telegram message, latest-only webapp, Notion Brief Tracker index page, old briefs retroactively renamed |
 | v1.5 | 2026-03-20 | Supabase integration — briefs + stories stored in PostgreSQL for analytics and dashboards |
 | v1.6 | 2026-03-20 | Idempotency — skip if brief already exists for today; auto-update Notion Brief Tracker after each run |
+| v1.7 | 2026-03-20 | Date tabs (Today/Yesterday/2 Days Ago); Recent Highlights from Supabase; dark/light mode toggle |
 
 ---
 

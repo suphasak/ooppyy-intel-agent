@@ -1,3 +1,6 @@
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
 export default async function handler(req, res) {
   try {
     const r = await fetch(
@@ -7,13 +10,14 @@ export default async function handler(req, res) {
     const data = await r.json();
     if (!r.ok) throw new Error('Failed to fetch Notion index');
 
-    // Only brief pages (skip tracker and other pages)
-    const briefPages = data.results.filter(b =>
-      b.type === 'child_page' && (b.child_page?.title || '').includes('Brief #')
-    );
+    // Brief pages only — skip tracker and non-brief pages. Take last 3 only.
+    const briefPages = data.results
+      .filter(b => b.type === 'child_page' && (b.child_page?.title || '').includes('Brief #'))
+      .slice(-3);
+
     if (!briefPages.length) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
 
-    // Selected brief: ?id= param or default to latest
+    // Selected: ?id= param or latest
     const requestedId = req.query?.id;
     let selectedIdx = briefPages.length - 1;
     if (requestedId) {
@@ -21,45 +25,66 @@ export default async function handler(req, res) {
       if (found !== -1) selectedIdx = found;
     }
 
-    // Fetch selected brief + 2 previous in parallel
-    const pagesToFetch = [
-      briefPages[selectedIdx],
-      briefPages[selectedIdx - 1],
-      briefPages[selectedIdx - 2],
-    ].filter(Boolean);
-
-    const blocksResults = await Promise.all(
-      pagesToFetch.map(page =>
-        fetch(`https://api.notion.com/v1/blocks/${page.id}/children?page_size=100`, {
-          headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' }
-        }).then(r => r.json())
-      )
+    // Fetch Notion blocks for selected brief only
+    const br = await fetch(
+      `https://api.notion.com/v1/blocks/${briefPages[selectedIdx].id}/children?page_size=100`,
+      { headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' } }
     );
+    const blocks = await br.json();
+    const rawJson = (blocks.results || [])
+      .filter(b => b.type === 'code')
+      .map(b => b.code.rich_text.map(t => t.plain_text).join(''))
+      .join('');
 
-    const briefs = blocksResults.map(blocks => {
-      const codeBlocks = (blocks.results || []).filter(b => b.type === 'code');
-      if (!codeBlocks.length) return null;
-      const rawJson = codeBlocks.map(b => b.code.rich_text.map(t => t.plain_text).join('')).join('');
-      try { return JSON.parse(rawJson); } catch { return null; }
-    });
-
-    const currentBrief = briefs[0];
+    let currentBrief = null;
+    try { currentBrief = JSON.parse(rawJson); } catch {}
     if (!currentBrief) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
 
-    const previousBriefs = briefs.slice(1).filter(Boolean);
+    // Top stories from previous 2 briefs — pulled from Supabase (not Notion, not old iterations)
+    const recentHighlights = [];
+    if (SUPABASE_URL && SUPABASE_KEY) {
+      const prevBriefNums = briefPages
+        .slice(0, selectedIdx)
+        .slice(-2)
+        .reverse()
+        .map(p => extractBriefNum(p.child_page?.title || ''))
+        .filter(Boolean);
 
-    // Build date tabs — most recent first
-    const dateTabs = [...briefPages].reverse().map((page, i) => {
-      const origIdx = briefPages.length - 1 - i;
-      return {
-        id: page.id,
-        label: shortLabel(page.child_page?.title || '', i),
-        briefNum: extractBriefNum(page.child_page?.title || ''),
-        isSelected: origIdx === selectedIdx,
-      };
-    });
+      if (prevBriefNums.length) {
+        const rows = await Promise.all(
+          prevBriefNums.map(num =>
+            fetch(`${SUPABASE_URL}/rest/v1/stories?brief_num=eq.${num}&order=virality.desc&limit=1&select=*`, {
+              headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+            }).then(r => r.ok ? r.json() : []).catch(() => [])
+          )
+        );
+        const sectionMeta = {
+          world:   { emoji: '🌍', color: '#0ea5e9' },
+          markets: { emoji: '📈', color: '#22c55e' },
+          tech:    { emoji: '💻', color: '#a855f7' },
+          fashion: { emoji: '👗', color: '#ec4899' },
+        };
+        rows.forEach((list, i) => {
+          const story = Array.isArray(list) && list[0];
+          if (!story) return;
+          const meta = sectionMeta[story.section_key] || { emoji: '📰', color: '#888' };
+          recentHighlights.push({
+            story: { ...story, ...meta },
+            dayLabel: i === 0 ? 'Yesterday' : '2 Days Ago',
+          });
+        });
+      }
+    }
 
-    const html = renderHTML(currentBrief, previousBriefs, dateTabs);
+    // Date tabs — max 3, most recent first
+    const dateTabs = [...briefPages].reverse().map((page, i) => ({
+      id: page.id,
+      label: ['Today', 'Yesterday', '2 Days Ago'][i] || `#${extractBriefNum(page.child_page?.title || '')}`,
+      briefNum: extractBriefNum(page.child_page?.title || ''),
+      isSelected: (briefPages.length - 1 - i) === selectedIdx,
+    }));
+
+    const html = renderHTML(currentBrief, recentHighlights, dateTabs);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=900');
     res.status(200).send(html);
@@ -75,22 +100,12 @@ function extractBriefNum(title) {
   return m ? parseInt(m[1]) : null;
 }
 
-function shortLabel(title, posFromLatest) {
-  if (posFromLatest === 0) return 'Today';
-  if (posFromLatest === 1) return 'Yesterday';
-  // Extract "20 Mar" from title like "📰 Brief #9 — Thursday, 20 March 2026 [Agent v1.5]"
-  const m = title.match(/—\s*\w+,\s*(\d+)\s+(\w{3})/);
-  if (m) return `${m[2]} ${m[1]}`;
-  const n = extractBriefNum(title);
-  return n ? `#${n}` : '—';
-}
-
 function e(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function renderHTML(data, previousBriefs, dateTabs) {
-  const { date, sections = [], opportunities = [], briefNum, agentVersion, sourcesUsed = [] } = data;
+function renderHTML(data, recentHighlights, dateTabs) {
+  const { date, sections = [], opportunities = [], briefNum, agentVersion } = data;
 
   const categoryTabs = [
     { key: 'all', label: 'All', emoji: '⚡' },
@@ -98,23 +113,18 @@ function renderHTML(data, previousBriefs, dateTabs) {
     { key: 'opps', label: 'Actions', emoji: '🎯' }
   ];
 
-  // Recent highlights from previous 2 days
-  const recentHighlights = previousBriefs.map(brief => {
-    const allStories = (brief.sections || []).flatMap(s =>
-      (s.stories || []).map(st => ({ ...st, emoji: s.emoji, color: s.color }))
-    ).sort((a, b) => (b.virality || 0) - (a.virality || 0));
-    const top = allStories[0];
-    return top ? { story: top, date: brief.date, briefNum: brief.briefNum } : null;
-  }).filter(Boolean);
-
   const recentHTML = recentHighlights.length ? `
     <div class="recent-wrap">
       <div class="recent-label">📅 Recent Highlights</div>
-      ${recentHighlights.map(({ story, date: d, briefNum: n }) => `
-        <div class="recent-card" style="--c:${e(story.color || '#888')}">
-          <div class="recent-meta">${story.emoji} ${e(d || '')} ${n ? `· #${n}` : ''} · 🔥${story.virality || ''}</div>
+      ${recentHighlights.map(({ story, dayLabel }) => `
+        <div class="recent-card" style="--c:${e(story.color)}">
+          <div class="recent-meta">${story.emoji} <span class="recent-day">${e(dayLabel)}</span> · Brief #${story.brief_num || ''} · 🔥${story.virality || ''}</div>
           <div class="recent-hl">${e(story.headline)}</div>
           <div class="recent-sw">${e(story.sowhat)}</div>
+          ${story.source_url ? `<a href="${e(story.source_url)}" target="_blank" class="src-btn" style="margin-top:7px">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            ${e(story.source_name || 'Source')}
+          </a>` : ''}
         </div>`).join('')}
     </div>` : '';
 
@@ -181,50 +191,91 @@ function renderHTML(data, previousBriefs, dateTabs) {
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Ooppyy Intel #${briefNum || ''}</title>
   <style>
-    :root{--bg:#000;--s1:rgba(28,28,30,.98);--s2:rgba(44,44,46,.7);--txt:rgba(255,255,255,1);--txt2:rgba(235,235,245,.55);--sep:rgba(84,84,88,.3);--r:20px}
+    /* ── DARK (default) ── */
+    :root{
+      --bg:#000;
+      --topbar-bg:rgba(0,0,0,.88);
+      --s1:rgba(28,28,30,.98);
+      --s2:rgba(44,44,46,.7);
+      --txt:#fff;
+      --txt2:rgba(235,235,245,.55);
+      --sep:rgba(84,84,88,.3);
+      --pill-bg:rgba(255,255,255,.08);
+      --pill-border:rgba(255,255,255,.1);
+      --tab-bg:rgba(255,255,255,.07);
+      --tab-active-bg:#fff;
+      --tab-active-txt:#000;
+      --dtab-active-bg:rgba(255,255,255,.14);
+      --dtab-active-border:rgba(255,255,255,.2);
+      --recent-bg:rgba(255,255,255,.04);
+      --r:20px;
+    }
+    /* ── LIGHT ── */
+    html.light{
+      --bg:#f2f2f7;
+      --topbar-bg:rgba(242,242,247,.92);
+      --s1:#fff;
+      --s2:rgba(242,242,247,.9);
+      --txt:#000;
+      --txt2:rgba(60,60,67,.55);
+      --sep:rgba(60,60,67,.15);
+      --pill-bg:rgba(0,0,0,.06);
+      --pill-border:rgba(0,0,0,.1);
+      --tab-bg:rgba(0,0,0,.06);
+      --tab-active-bg:#000;
+      --tab-active-txt:#fff;
+      --dtab-active-bg:rgba(0,0,0,.12);
+      --dtab-active-border:rgba(0,0,0,.2);
+      --recent-bg:rgba(0,0,0,.03);
+    }
+
     *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
     html{background:var(--bg)}
-    body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;background:var(--bg);color:var(--txt);min-height:100dvh;padding-bottom:calc(env(safe-area-inset-bottom)+20px)}
+    body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;background:var(--bg);color:var(--txt);min-height:100dvh;padding-bottom:calc(env(safe-area-inset-bottom)+20px);transition:background .25s,color .25s}
 
     /* TOP BAR */
-    .topbar{position:sticky;top:0;z-index:99;padding:50px 16px 8px;background:rgba(0,0,0,.88);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border-bottom:1px solid var(--sep)}
+    .topbar{position:sticky;top:0;z-index:99;padding:50px 16px 8px;background:var(--topbar-bg);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border-bottom:1px solid var(--sep)}
     .topbar-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-    .agent-pill{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:5px 12px 5px 8px;font-size:.75rem;font-weight:700;letter-spacing:.04em}
-    .live{width:7px;height:7px;border-radius:50%;background:#30d158;box-shadow:0 0 6px #30d158;animation:pulse 2s infinite}
+    .agent-pill{display:flex;align-items:center;gap:8px;background:var(--pill-bg);border:1px solid var(--pill-border);border-radius:999px;padding:5px 12px 5px 8px;font-size:.75rem;font-weight:700;letter-spacing:.04em;color:var(--txt)}
+    .live{width:7px;height:7px;border-radius:50%;background:#30d158;box-shadow:0 0 6px #30d158;animation:pulse 2s infinite;flex-shrink:0}
     @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
-    .share-btn{background:rgba(10,132,255,.15);border:1px solid rgba(10,132,255,.3);color:#0a84ff;font-size:.78rem;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;display:flex;align-items:center;gap:5px;text-decoration:none}
+    .topbar-actions{display:flex;gap:8px;align-items:center}
+    .theme-btn{background:var(--pill-bg);border:1px solid var(--pill-border);color:var(--txt);font-size:.78rem;font-weight:600;padding:6px 10px;border-radius:999px;cursor:pointer;line-height:1}
+    .theme-btn:active{opacity:.6}
+    .share-btn{background:rgba(10,132,255,.15);border:1px solid rgba(10,132,255,.3);color:#0a84ff;font-size:.78rem;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;display:flex;align-items:center;gap:5px}
     .share-btn:active{opacity:.6}
 
     /* DATE TABS */
     .dtabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:6px;margin-bottom:4px}
     .dtabs::-webkit-scrollbar{display:none}
-    .dtab{flex-shrink:0;display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.06);border:1px solid var(--sep);border-radius:999px;color:var(--txt2);font-size:.75rem;font-weight:600;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:all .2s;text-decoration:none}
-    .dtab.active{background:rgba(255,255,255,.14);color:var(--txt);border-color:rgba(255,255,255,.2)}
+    .dtab{flex-shrink:0;display:flex;align-items:center;gap:5px;background:var(--tab-bg);border:1px solid var(--sep);border-radius:999px;color:var(--txt2);font-size:.75rem;font-weight:600;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:all .2s;text-decoration:none}
+    .dtab.active{background:var(--dtab-active-bg);color:var(--txt);border-color:var(--dtab-active-border)}
     .dtab:active{transform:scale(.95)}
     .dtab-dot{width:6px;height:6px;border-radius:50%;background:#30d158;box-shadow:0 0 5px #30d158;flex-shrink:0}
-    .dtab-num{opacity:.5;font-size:.68rem}
+    .dtab-num{opacity:.45;font-size:.68rem}
 
     /* CATEGORY TABS */
     .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
     .tabs::-webkit-scrollbar{display:none}
-    .tab{flex-shrink:0;background:rgba(255,255,255,.07);border:1px solid var(--sep);border-radius:999px;color:var(--txt2);font-size:.75rem;font-weight:600;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:all .2s}
-    .tab.active{background:var(--txt);color:#000;border-color:transparent}
+    .tab{flex-shrink:0;background:var(--tab-bg);border:1px solid var(--sep);border-radius:999px;color:var(--txt2);font-size:.75rem;font-weight:600;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:all .2s}
+    .tab.active{background:var(--tab-active-bg);color:var(--tab-active-txt);border-color:transparent}
     .tab:active{transform:scale(.95)}
 
     /* HERO */
     .hero{padding:20px 16px 12px}
     .hero-eyebrow{font-size:.68rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--txt2);margin-bottom:6px}
-    .hero-title{font-size:clamp(1.5rem,6vw,2rem);font-weight:800;letter-spacing:-.03em;line-height:1.1;background:linear-gradient(135deg,#fff 30%,rgba(255,255,255,.6));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    .hero-title{font-size:clamp(1.5rem,6vw,2rem);font-weight:800;letter-spacing:-.03em;line-height:1.1;color:var(--txt)}
     .hero-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
-    .meta-tag{font-size:.7rem;font-weight:600;color:var(--txt2);background:rgba(255,255,255,.07);border:1px solid var(--sep);border-radius:999px;padding:3px 10px}
+    .meta-tag{font-size:.7rem;font-weight:600;color:var(--txt2);background:var(--tab-bg);border:1px solid var(--sep);border-radius:999px;padding:3px 10px}
 
     /* RECENT HIGHLIGHTS */
     .recent-wrap{padding:0 12px 4px}
     .recent-label{font-size:.65rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--txt2);margin-bottom:8px;padding-left:2px}
-    .recent-card{background:rgba(255,255,255,.04);border:1px solid var(--sep);border-left:3px solid var(--c,#888);border-radius:14px;padding:10px 12px;margin-bottom:7px}
+    .recent-card{background:var(--recent-bg);border:1px solid var(--sep);border-left:3px solid var(--c,#888);border-radius:14px;padding:10px 12px;margin-bottom:7px}
     .recent-meta{font-size:.65rem;font-weight:700;color:var(--txt2);letter-spacing:.04em;margin-bottom:4px}
+    .recent-day{color:var(--txt);font-weight:800}
     .recent-hl{font-size:.84rem;font-weight:600;line-height:1.4;color:var(--txt);margin-bottom:5px}
-    .recent-sw{font-size:.76rem;line-height:1.45;color:rgba(235,235,245,.6);border-left:2px solid rgba(245,158,11,.4);padding-left:8px}
+    .recent-sw{font-size:.76rem;line-height:1.45;color:var(--txt2);border-left:2px solid rgba(245,158,11,.4);padding-left:8px}
 
     /* SECTIONS */
     .feed{padding:0 12px}
@@ -239,10 +290,11 @@ function renderHTML(data, previousBriefs, dateTabs) {
     /* STORIES */
     .story-card{padding:11px 14px;border-bottom:1px solid var(--sep);cursor:pointer;transition:background .15s}
     .story-card:last-child{border-bottom:none}
-    .story-card:active{background:rgba(255,255,255,.04)}
+    .story-card:active{background:var(--recent-bg)}
     .story-row{display:flex;align-items:flex-start;gap:9px}
-    .story-num{min-width:20px;height:20px;border-radius:50%;color:#000;font-size:.68rem;font-weight:800;display:flex;align-items:center;justify-content:center;margin-top:1px;flex-shrink:0}
-    .story-hl{font-size:.88rem;font-weight:600;line-height:1.45;flex:1}
+    .story-num{min-width:20px;height:20px;border-radius:50%;color:#fff;font-size:.68rem;font-weight:800;display:flex;align-items:center;justify-content:center;margin-top:1px;flex-shrink:0}
+    html.light .story-num{color:#000;filter:brightness(1.2)}
+    .story-hl{font-size:.88rem;font-weight:600;line-height:1.45;flex:1;color:var(--txt)}
     .chevron{color:var(--txt2);font-size:1.1rem;transition:transform .25s;flex-shrink:0}
     .story-card.open .chevron{transform:rotate(90deg)}
     .story-expand{max-height:0;overflow:hidden;transition:max-height .35s ease;padding-left:29px}
@@ -251,20 +303,20 @@ function renderHTML(data, previousBriefs, dateTabs) {
     .src-btn:active{background:rgba(10,132,255,.25)}
     .sowhat{background:rgba(245,158,11,.07);border-left:2px solid #f59e0b;border-radius:0 8px 8px 0;padding:8px 10px;margin-bottom:8px}
     .sowhat-label{font-size:.65rem;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#f59e0b;margin-bottom:3px}
-    .sowhat-body{font-size:.82rem;line-height:1.55;color:rgba(235,235,245,.78)}
+    .sowhat-body{font-size:.82rem;line-height:1.55;color:var(--txt2)}
 
     /* OPPS */
     .opp-row{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid var(--sep)}
     .opp-row:last-child{border-bottom:none}
     .opp-dot{min-width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 5px rgba(245,158,11,.5);margin-top:6px;flex-shrink:0}
-    .opp-text{font-size:.86rem;line-height:1.5;color:rgba(235,235,245,.85)}
+    .opp-text{font-size:.86rem;line-height:1.5;color:var(--txt)}
 
     /* FOOTER */
     .footer{padding:16px;text-align:center;color:var(--txt2);font-size:.72rem;line-height:1.7}
     .footer a{color:#0a84ff;text-decoration:none}
 
     /* TOAST */
-    .toast{position:fixed;bottom:calc(28px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(80px);background:rgba(44,44,46,.95);color:#fff;font-size:.83rem;font-weight:600;padding:11px 20px;border-radius:999px;backdrop-filter:blur(20px);z-index:999;transition:transform .3s cubic-bezier(.34,1.56,.64,1);border:1px solid var(--sep)}
+    .toast{position:fixed;bottom:calc(28px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(80px);background:var(--s1);color:var(--txt);font-size:.83rem;font-weight:600;padding:11px 20px;border-radius:999px;backdrop-filter:blur(20px);z-index:999;transition:transform .3s cubic-bezier(.34,1.56,.64,1);border:1px solid var(--sep)}
     .toast.show{transform:translateX(-50%) translateY(0)}
   </style>
 </head>
@@ -273,10 +325,13 @@ function renderHTML(data, previousBriefs, dateTabs) {
 <div class="topbar">
   <div class="topbar-row">
     <div class="agent-pill"><div class="live"></div>Ooppyy · Market Intelligence</div>
-    <button class="share-btn" onclick="share()">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-      Share
-    </button>
+    <div class="topbar-actions">
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">🌙</button>
+      <button class="share-btn" onclick="share()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        Share
+      </button>
+    </div>
   </div>
   <div class="dtabs">${dateTabsHTML}</div>
   <div class="tabs">${categoryTabsHTML}</div>
@@ -287,7 +342,7 @@ function renderHTML(data, previousBriefs, dateTabs) {
   <div class="hero-title">Your Daily<br>Market Edge</div>
   <div class="hero-meta">
     <span class="meta-tag">📅 ${e(date || '')}</span>
-    ${agentVersion ? `<span class="meta-tag">🤖 Agent v${e(agentVersion)}</span>` : ''}
+    ${agentVersion ? `<span class="meta-tag">🤖 v${e(agentVersion)}</span>` : ''}
     <span class="meta-tag">📰 ${sections.reduce((n,s) => n+(s.stories||[]).length,0)} stories</span>
   </div>
 </div>
@@ -307,6 +362,21 @@ ${recentHTML}
 <div class="toast" id="toast">✅ Link copied!</div>
 
 <script>
+  // Theme
+  (function() {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'light') {
+      document.documentElement.classList.add('light');
+      document.getElementById('theme-btn').textContent = '☀️';
+    }
+  })();
+
+  function toggleTheme() {
+    const isLight = document.documentElement.classList.toggle('light');
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+    document.getElementById('theme-btn').textContent = isLight ? '☀️' : '🌙';
+  }
+
   function toggle(el) { el.classList.toggle('open'); }
 
   function setTab(key) {
@@ -319,7 +389,7 @@ ${recentHTML}
   function share() {
     const url = window.location.href;
     if (navigator.share) {
-      navigator.share({ title: 'Ooppyy Intel Brief', text: 'Your daily market intelligence brief', url }).catch(()=>{});
+      navigator.share({ title: 'Ooppyy Intel Brief', text: 'Daily market intelligence', url }).catch(()=>{});
     } else {
       navigator.clipboard.writeText(url).then(() => {
         const t = document.getElementById('toast');
