@@ -10,9 +10,17 @@ export default async function handler(req, res) {
     const data = await r.json();
     if (!r.ok) throw new Error('Failed to fetch Notion index');
 
-    // Brief pages only — skip tracker and non-brief pages. Take last 3 only.
+    // Brief pages only — skip tracker and non-brief pages.
+    // Only show briefs from 20 March 2026 onwards; take last 3.
+    const cutoffDate = new Date('2026-03-20T00:00:00+08:00');
     const briefPages = data.results
-      .filter(b => b.type === 'child_page' && (b.child_page?.title || '').includes('Brief #'))
+      .filter(b => {
+        if (b.type !== 'child_page') return false;
+        const title = b.child_page?.title || '';
+        if (!title.includes('Brief #')) return false;
+        const d = extractDateFromTitle(title);
+        return d && d >= cutoffDate;
+      })
       .slice(-3);
 
     if (!briefPages.length) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
@@ -64,25 +72,31 @@ export default async function handler(req, res) {
           tech:    { emoji: '💻', color: '#a855f7' },
           fashion: { emoji: '👗', color: '#ec4899' },
         };
+        const prevPages = briefPages.slice(0, selectedIdx).slice(-2).reverse();
         rows.forEach((list, i) => {
           const story = Array.isArray(list) && list[0];
           if (!story) return;
           const meta = sectionMeta[story.section_key] || { emoji: '📰', color: '#888' };
+          const pageDate = extractDateFromTitle(prevPages[i]?.child_page?.title || '');
+          const dayLabel = pageDate ? formatTabDate(pageDate) : (i === 0 ? 'Yesterday' : '2 Days Ago');
           recentHighlights.push({
             story: { ...story, ...meta },
-            dayLabel: i === 0 ? 'Yesterday' : '2 Days Ago',
+            dayLabel,
           });
         });
       }
     }
 
-    // Date tabs — max 3, most recent first
-    const dateTabs = [...briefPages].reverse().map((page, i) => ({
-      id: page.id,
-      label: ['Today', 'Yesterday', '2 Days Ago'][i] || `#${extractBriefNum(page.child_page?.title || '')}`,
-      briefNum: extractBriefNum(page.child_page?.title || ''),
-      isSelected: (briefPages.length - 1 - i) === selectedIdx,
-    }));
+    // Date tabs — max 3, most recent first, showing actual dates
+    const dateTabs = [...briefPages].reverse().map((page, i) => {
+      const pageDate = extractDateFromTitle(page.child_page?.title || '');
+      return {
+        id: page.id,
+        label: pageDate ? formatTabDate(pageDate) : `#${extractBriefNum(page.child_page?.title || '')}`,
+        briefNum: extractBriefNum(page.child_page?.title || ''),
+        isSelected: (briefPages.length - 1 - i) === selectedIdx,
+      };
+    });
 
     const html = renderHTML(currentBrief, recentHighlights, dateTabs);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -98,6 +112,18 @@ export default async function handler(req, res) {
 function extractBriefNum(title) {
   const m = title.match(/Brief #(\d+)/);
   return m ? parseInt(m[1]) : null;
+}
+
+function extractDateFromTitle(title) {
+  // Title format: "📰 Brief #N — Thursday, 20 March 2026 [Agent v1.7]"
+  const m = title.match(/—\s+([^[]+)\s+\[/);
+  if (!m) return null;
+  try { return new Date(m[1].trim()); } catch { return null; }
+}
+
+function formatTabDate(dateObj) {
+  if (!dateObj || isNaN(dateObj)) return '';
+  return dateObj.toLocaleDateString('en-SG', { month: 'short', day: 'numeric', timeZone: 'Asia/Singapore' });
 }
 
 function e(s) {
