@@ -104,6 +104,12 @@ export default async function handler(req, res) {
       qualifiedFindings: qualified.length,
       newFindings: newFindings.length,
       telegramSent: newFindings.length > 0,
+      debug: results.map((r, i) => ({
+        geo: GEO_GROUPS[i].geo,
+        status: r.status,
+        count: r.status === 'fulfilled' ? r.value.length : 0,
+        error: r.status === 'rejected' ? r.reason?.message?.substring(0, 200) : undefined,
+      })),
     });
   } catch (error) {
     console.error(`[${AGENT_NAME}] Fatal error:`, error);
