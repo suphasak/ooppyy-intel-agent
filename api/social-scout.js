@@ -70,8 +70,9 @@ export default async function handler(req, res) {
       allFindings = await searchAllBrands();
       results = [{ status: 'fulfilled', count: allFindings.length }];
     } catch (e) {
-      results = [{ status: 'rejected', count: 0, error: e.message?.substring(0, 200) }];
-      console.error(`[${AGENT_NAME}] Search error:`, e.message);
+      const errMsg = e?.message || String(e) || 'unknown error';
+      results = [{ status: 'rejected', count: 0, error: errMsg.substring(0, 300) }];
+      console.error(`[${AGENT_NAME}] Search error:`, errMsg);
     }
 
     console.log(`[${AGENT_NAME}] Raw findings: ${allFindings.length}`);
@@ -104,12 +105,7 @@ export default async function handler(req, res) {
       qualifiedFindings: qualified.length,
       newFindings: newFindings.length,
       telegramSent: newFindings.length > 0,
-      debug: results.map((r, i) => ({
-        geo: GEO_GROUPS[i].geo,
-        status: r.status,
-        count: r.status === 'fulfilled' ? r.value.length : 0,
-        error: r.status === 'rejected' ? r.reason?.message?.substring(0, 200) : undefined,
-      })),
+      debug: results,
     });
   } catch (error) {
     console.error(`[${AGENT_NAME}] Fatal error:`, error);
