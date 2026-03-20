@@ -63,15 +63,15 @@ export default async function handler(req, res) {
   console.log(`[${AGENT_NAME}] v${AGENT_VERSION} starting — runId: ${runId}`);
 
   try {
-    // Search all geo groups in parallel (avoids sequential timeout)
-    const results = await Promise.allSettled(GEO_GROUPS.map(group => searchGeoGroup(group)));
-    const allFindings = [];
-    for (const [i, result] of results.entries()) {
-      if (result.status === 'fulfilled') {
-        allFindings.push(...result.value);
-      } else {
-        console.error(`[${AGENT_NAME}] Error searching geo ${GEO_GROUPS[i].geo}:`, result.reason?.message);
-      }
+    // Single Groq call for all brands — avoids rate limits, fits in 60s
+    let allFindings = [];
+    let results = [];
+    try {
+      allFindings = await searchAllBrands();
+      results = [{ status: 'fulfilled', count: allFindings.length }];
+    } catch (e) {
+      results = [{ status: 'rejected', count: 0, error: e.message?.substring(0, 200) }];
+      console.error(`[${AGENT_NAME}] Search error:`, e.message);
     }
 
     console.log(`[${AGENT_NAME}] Raw findings: ${allFindings.length}`);
@@ -117,42 +117,36 @@ export default async function handler(req, res) {
   }
 }
 
-// ── Groq search (compound-beta — built-in web search) ─────────────────────────
+// ── Groq search (compound-beta — built-in web search, single call) ────────────
 
-async function searchGeoGroup(group) {
-  const { geo, brands } = group;
-  const brandList = brands.map(b => `${b.name} (${b.category})`).join(', ');
-
+async function searchAllBrands() {
   const signalList = SIGNAL_TYPES.map((s, i) => `${i + 1}. ${s}`).join('\n');
+
+  const brandsByGeo = GEO_GROUPS.map(g =>
+    `${g.geo}: ${g.brands.map(b => `${b.name} (${b.category})`).join(', ')}`
+  ).join('\n');
 
   const prompt = `You are a fashion industry intelligence analyst. Today is ${getSGTDateLabel()}.
 
-Search the web for the LATEST news and developments (past 7 days) for these brands operating in ${geo}:
-${brandList}
+Search the web for the LATEST news (past 7 days) for these fashion/footwear brands across GCC, India, and SEA:
 
-For each brand, look for these signal types:
+${brandsByGeo}
+
+For each brand, look for:
 ${signalList}
 
-Also look for COMPETITOR brands making significant moves in the same categories and geo (${geo}).
+Also identify key COMPETITOR brands making notable moves in the same categories.
 
-Return a JSON array of findings. Each finding must have:
-- brand: exact brand name from the list above (or competitor brand name)
-- geo: "${geo}"
+Return a JSON array. Each item must have:
+- brand: brand name
+- geo: GCC | India | SEA
 - headline: one sharp sentence (max 15 words)
-- summary: one sentence context/implication (max 25 words)
-- signal_type: one of: launch | partnership | market entry | store/retail | campaign | funding | competitor | distribution
-- score: 1-10 (7+ = highly relevant, novel, actionable; score based on novelty, business impact, and recency)
-- source_url: direct URL to the news source, or ""
+- summary: one sentence implication (max 25 words)
+- signal_type: launch | partnership | market entry | store/retail | campaign | funding | competitor | distribution
+- score: 1-10 (recency + business impact + novelty)
+- source_url: URL or ""
 
-Rules:
-- Only include REAL, VERIFIABLE news (no hallucinations)
-- If no credible news found for a brand, omit it — do not fabricate
-- Prefer news from the past 7 days; older news scores lower
-- Output ONLY a valid JSON array, no markdown, no text before or after
-- If no findings at all, return []
-
-Example output:
-[{"brand":"Keds","geo":"GCC","headline":"Keds launches sustainable canvas line across UAE retail","summary":"New eco-line targets millennial shoppers in three UAE flagship stores.","signal_type":"launch","score":8,"source_url":"https://example.com/keds-uae"}]`;
+Rules: only REAL verifiable news. No fabrication. Output ONLY a valid JSON array, nothing else.`;
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -187,7 +181,7 @@ Example output:
     findings = JSON.parse(cleaned);
     if (!Array.isArray(findings)) findings = [];
   } catch (e) {
-    console.error(`[${AGENT_NAME}] JSON parse failed for geo ${geo}:`, cleaned.substring(0, 300));
+    console.error(`[${AGENT_NAME}] JSON parse failed:`, cleaned.substring(0, 300));
     findings = [];
   }
 
