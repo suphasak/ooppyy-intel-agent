@@ -1,6 +1,5 @@
 export default async function handler(req, res) {
   try {
-    // Get all child pages
     const r = await fetch(
       `https://api.notion.com/v1/blocks/${process.env.NOTION_PAGE_ID}/children?page_size=100`,
       { headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' } }
@@ -8,32 +7,59 @@ export default async function handler(req, res) {
     const data = await r.json();
     if (!r.ok) throw new Error('Failed to fetch Notion index');
 
-    const childPages = data.results.filter(b => b.type === 'child_page');
-    if (!childPages.length) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
-
-    // Always show the latest brief only (last child page)
-    const idx = 0;
-    const page = childPages[childPages.length - 1];
-
-    // Fetch blocks of the selected brief
-    const br = await fetch(
-      `https://api.notion.com/v1/blocks/${page.id}/children?page_size=100`,
-      { headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' } }
+    // Only brief pages (skip tracker and other pages)
+    const briefPages = data.results.filter(b =>
+      b.type === 'child_page' && (b.child_page?.title || '').includes('Brief #')
     );
-    const blocks = await br.json();
-    if (!br.ok) throw new Error('Failed to fetch brief blocks');
+    if (!briefPages.length) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
 
-    // Extract JSON from code blocks
-    const codeBlocks = blocks.results.filter(b => b.type === 'code');
-    let briefData = null;
-    if (codeBlocks.length) {
-      const rawJson = codeBlocks.map(b => b.code.rich_text.map(t => t.plain_text).join('')).join('');
-      try { briefData = JSON.parse(rawJson); } catch (e) { /* fall through */ }
+    // Selected brief: ?id= param or default to latest
+    const requestedId = req.query?.id;
+    let selectedIdx = briefPages.length - 1;
+    if (requestedId) {
+      const found = briefPages.findIndex(p => p.id === requestedId);
+      if (found !== -1) selectedIdx = found;
     }
 
-    if (!briefData) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
+    // Fetch selected brief + 2 previous in parallel
+    const pagesToFetch = [
+      briefPages[selectedIdx],
+      briefPages[selectedIdx - 1],
+      briefPages[selectedIdx - 2],
+    ].filter(Boolean);
 
-    const html = renderHTML(briefData);
+    const blocksResults = await Promise.all(
+      pagesToFetch.map(page =>
+        fetch(`https://api.notion.com/v1/blocks/${page.id}/children?page_size=100`, {
+          headers: { 'Authorization': `Bearer ${process.env.NOTION_TOKEN}`, 'Notion-Version': '2022-06-28' }
+        }).then(r => r.json())
+      )
+    );
+
+    const briefs = blocksResults.map(blocks => {
+      const codeBlocks = (blocks.results || []).filter(b => b.type === 'code');
+      if (!codeBlocks.length) return null;
+      const rawJson = codeBlocks.map(b => b.code.rich_text.map(t => t.plain_text).join('')).join('');
+      try { return JSON.parse(rawJson); } catch { return null; }
+    });
+
+    const currentBrief = briefs[0];
+    if (!currentBrief) return res.setHeader('Content-Type', 'text/html').status(200).send(emptyPage());
+
+    const previousBriefs = briefs.slice(1).filter(Boolean);
+
+    // Build date tabs — most recent first
+    const dateTabs = [...briefPages].reverse().map((page, i) => {
+      const origIdx = briefPages.length - 1 - i;
+      return {
+        id: page.id,
+        label: shortLabel(page.child_page?.title || '', i),
+        briefNum: extractBriefNum(page.child_page?.title || ''),
+        isSelected: origIdx === selectedIdx,
+      };
+    });
+
+    const html = renderHTML(currentBrief, previousBriefs, dateTabs);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=900');
     res.status(200).send(html);
@@ -44,18 +70,53 @@ export default async function handler(req, res) {
   }
 }
 
+function extractBriefNum(title) {
+  const m = title.match(/Brief #(\d+)/);
+  return m ? parseInt(m[1]) : null;
+}
+
+function shortLabel(title, posFromLatest) {
+  if (posFromLatest === 0) return 'Today';
+  if (posFromLatest === 1) return 'Yesterday';
+  // Extract "20 Mar" from title like "📰 Brief #9 — Thursday, 20 March 2026 [Agent v1.5]"
+  const m = title.match(/—\s*\w+,\s*(\d+)\s+(\w{3})/);
+  if (m) return `${m[2]} ${m[1]}`;
+  const n = extractBriefNum(title);
+  return n ? `#${n}` : '—';
+}
+
 function e(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function renderHTML(data) {
+function renderHTML(data, previousBriefs, dateTabs) {
   const { date, sections = [], opportunities = [], briefNum, agentVersion, sourcesUsed = [] } = data;
 
-  const tabs = [
+  const categoryTabs = [
     { key: 'all', label: 'All', emoji: '⚡' },
     ...sections.map(s => ({ key: s.key, label: s.label.split(' ')[0], emoji: s.emoji })),
     { key: 'opps', label: 'Actions', emoji: '🎯' }
   ];
+
+  // Recent highlights from previous 2 days
+  const recentHighlights = previousBriefs.map(brief => {
+    const allStories = (brief.sections || []).flatMap(s =>
+      (s.stories || []).map(st => ({ ...st, emoji: s.emoji, color: s.color }))
+    ).sort((a, b) => (b.virality || 0) - (a.virality || 0));
+    const top = allStories[0];
+    return top ? { story: top, date: brief.date, briefNum: brief.briefNum } : null;
+  }).filter(Boolean);
+
+  const recentHTML = recentHighlights.length ? `
+    <div class="recent-wrap">
+      <div class="recent-label">📅 Recent Highlights</div>
+      ${recentHighlights.map(({ story, date: d, briefNum: n }) => `
+        <div class="recent-card" style="--c:${e(story.color || '#888')}">
+          <div class="recent-meta">${story.emoji} ${e(d || '')} ${n ? `· #${n}` : ''} · 🔥${story.virality || ''}</div>
+          <div class="recent-hl">${e(story.headline)}</div>
+          <div class="recent-sw">${e(story.sowhat)}</div>
+        </div>`).join('')}
+    </div>` : '';
 
   const sectionsHTML = sections.map((section, si) => {
     const stories = (section.stories || []).map((story, i) => `
@@ -102,12 +163,15 @@ function renderHTML(data) {
         </div>`).join('')}
     </div>` : '';
 
-  const tabsHTML = tabs.map(t => `
+  const dateTabsHTML = dateTabs.map(t => `
+    <a class="dtab${t.isSelected ? ' active' : ''}" href="/api/view${t.isSelected ? '' : `?id=${t.id}`}">
+      ${t.isSelected ? '<span class="dtab-dot"></span>' : ''}${e(t.label)}${t.briefNum ? ` <span class="dtab-num">#${t.briefNum}</span>` : ''}
+    </a>`).join('');
+
+  const categoryTabsHTML = categoryTabs.map(t => `
     <button class="tab${t.key === 'all' ? ' active' : ''}" data-tab="${t.key}" onclick="setTab('${t.key}')">
       ${t.emoji} ${t.label}
     </button>`).join('');
-
-  const dateShort = new Date().toLocaleDateString('en-SG', { timeZone: 'Asia/Singapore', month: 'short', day: 'numeric' });
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -123,15 +187,24 @@ function renderHTML(data) {
     body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;background:var(--bg);color:var(--txt);min-height:100dvh;padding-bottom:calc(env(safe-area-inset-bottom)+20px)}
 
     /* TOP BAR */
-    .topbar{position:sticky;top:0;z-index:99;padding:50px 16px 10px;background:rgba(0,0,0,.88);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border-bottom:1px solid var(--sep)}
+    .topbar{position:sticky;top:0;z-index:99;padding:50px 16px 8px;background:rgba(0,0,0,.88);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border-bottom:1px solid var(--sep)}
     .topbar-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
     .agent-pill{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:5px 12px 5px 8px;font-size:.75rem;font-weight:700;letter-spacing:.04em}
     .live{width:7px;height:7px;border-radius:50%;background:#30d158;box-shadow:0 0 6px #30d158;animation:pulse 2s infinite}
     @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
-    .share-btn{background:rgba(10,132,255,.15);border:1px solid rgba(10,132,255,.3);color:#0a84ff;font-size:.78rem;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;display:flex;align-items:center;gap:5px}
+    .share-btn{background:rgba(10,132,255,.15);border:1px solid rgba(10,132,255,.3);color:#0a84ff;font-size:.78rem;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;display:flex;align-items:center;gap:5px;text-decoration:none}
     .share-btn:active{opacity:.6}
 
-    /* TABS */
+    /* DATE TABS */
+    .dtabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:6px;margin-bottom:4px}
+    .dtabs::-webkit-scrollbar{display:none}
+    .dtab{flex-shrink:0;display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.06);border:1px solid var(--sep);border-radius:999px;color:var(--txt2);font-size:.75rem;font-weight:600;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:all .2s;text-decoration:none}
+    .dtab.active{background:rgba(255,255,255,.14);color:var(--txt);border-color:rgba(255,255,255,.2)}
+    .dtab:active{transform:scale(.95)}
+    .dtab-dot{width:6px;height:6px;border-radius:50%;background:#30d158;box-shadow:0 0 5px #30d158;flex-shrink:0}
+    .dtab-num{opacity:.5;font-size:.68rem}
+
+    /* CATEGORY TABS */
     .tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
     .tabs::-webkit-scrollbar{display:none}
     .tab{flex-shrink:0;background:rgba(255,255,255,.07);border:1px solid var(--sep);border-radius:999px;color:var(--txt2);font-size:.75rem;font-weight:600;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:all .2s}
@@ -144,6 +217,14 @@ function renderHTML(data) {
     .hero-title{font-size:clamp(1.5rem,6vw,2rem);font-weight:800;letter-spacing:-.03em;line-height:1.1;background:linear-gradient(135deg,#fff 30%,rgba(255,255,255,.6));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
     .hero-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
     .meta-tag{font-size:.7rem;font-weight:600;color:var(--txt2);background:rgba(255,255,255,.07);border:1px solid var(--sep);border-radius:999px;padding:3px 10px}
+
+    /* RECENT HIGHLIGHTS */
+    .recent-wrap{padding:0 12px 4px}
+    .recent-label{font-size:.65rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--txt2);margin-bottom:8px;padding-left:2px}
+    .recent-card{background:rgba(255,255,255,.04);border:1px solid var(--sep);border-left:3px solid var(--c,#888);border-radius:14px;padding:10px 12px;margin-bottom:7px}
+    .recent-meta{font-size:.65rem;font-weight:700;color:var(--txt2);letter-spacing:.04em;margin-bottom:4px}
+    .recent-hl{font-size:.84rem;font-weight:600;line-height:1.4;color:var(--txt);margin-bottom:5px}
+    .recent-sw{font-size:.76rem;line-height:1.45;color:rgba(235,235,245,.6);border-left:2px solid rgba(245,158,11,.4);padding-left:8px}
 
     /* SECTIONS */
     .feed{padding:0 12px}
@@ -197,18 +278,21 @@ function renderHTML(data) {
       Share
     </button>
   </div>
-  <div class="tabs">${tabsHTML}</div>
+  <div class="dtabs">${dateTabsHTML}</div>
+  <div class="tabs">${categoryTabsHTML}</div>
 </div>
 
 <div class="hero">
   <div class="hero-eyebrow">Intelligence Brief ${briefNum ? `#${briefNum}` : ''}</div>
   <div class="hero-title">Your Daily<br>Market Edge</div>
   <div class="hero-meta">
-    <span class="meta-tag">📅 ${e(date || dateShort)}</span>
+    <span class="meta-tag">📅 ${e(date || '')}</span>
     ${agentVersion ? `<span class="meta-tag">🤖 Agent v${e(agentVersion)}</span>` : ''}
     <span class="meta-tag">📰 ${sections.reduce((n,s) => n+(s.stories||[]).length,0)} stories</span>
   </div>
 </div>
+
+${recentHTML}
 
 <div class="feed" id="feed">
   ${sectionsHTML}
