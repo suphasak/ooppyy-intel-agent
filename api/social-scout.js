@@ -171,15 +171,17 @@ Example output:
   const data = await response.json();
   const rawText = data?.choices?.[0]?.message?.content || '[]';
 
-  // Strip markdown code fences if present
-  const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  // Extract JSON array from response (handles prose before/after, code fences)
+  const start = rawText.indexOf('[');
+  const end = rawText.lastIndexOf(']');
+  const cleaned = start !== -1 && end > start ? rawText.slice(start, end + 1) : '[]';
 
   let findings;
   try {
     findings = JSON.parse(cleaned);
     if (!Array.isArray(findings)) findings = [];
   } catch (e) {
-    console.error(`[${AGENT_NAME}] JSON parse failed for geo ${geo}:`, cleaned.substring(0, 200));
+    console.error(`[${AGENT_NAME}] JSON parse failed for geo ${geo}:`, cleaned.substring(0, 300));
     findings = [];
   }
 
