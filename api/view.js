@@ -386,7 +386,7 @@ ${recentHTML}
 
 <div class="footer">
   Ooppyy · Market Intelligence Agent${agentVersion ? ` v${agentVersion}` : ''}<br>
-  <a href="/api/view">Daily Brief</a> · <a href="/api/scout">Social Scout</a>
+  <a href="/api/view">Daily Brief</a> · <a href="/api/scout">Social Scout</a> · <a href="/api/plan">Planning HQ</a>
 </div>
 
 <div class="toast" id="toast">✅ Link copied!</div>

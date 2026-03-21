@@ -18,6 +18,10 @@
     {
       "path": "/api/social-scout",
       "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/plan-brief",
+      "schedule": "0 13 * * *"
     }
   ]
 }
