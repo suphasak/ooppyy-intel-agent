@@ -73,8 +73,8 @@ const res = await fetch('https://api.notion.com/v1/pages', {
 });
 
 if (!res.ok) {
-  const err = await res.text();
-  console.error('Notion API error:', err);
+  const err = await res.json().catch(() => ({ message: 'unknown error' }));
+  console.error('Notion API error:', err.message || JSON.stringify(err));
   process.exit(1);
 }
 
