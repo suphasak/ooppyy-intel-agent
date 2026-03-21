@@ -206,6 +206,48 @@ async function handleAddGoal(chatId, text) {
   return sendTelegram(chatId, `🎯 <b>Goal added</b>\n${name} · ${quarter}`);
 }
 
+async function handleLinkProject(chatId, text) {
+  const { projects: projectsDbId, goals: goalsDbId } = dbIds();
+  if (!projectsDbId || !goalsDbId) return sendTelegram(chatId, missingDbMsg('Projects/Goals'));
+
+  // "link project: [name] to goal: [goal name]"
+  const m = text.match(/link\s+project:\s*(.+?)\s+to\s+goal:\s*(.+)/i);
+  if (!m) return sendTelegram(chatId, '❓ Format: <code>link project: [name] to goal: [goal name]</code>\nExample: <code>link project: Website Relaunch to goal: Q2 Brand Expansion</code>');
+
+  const projectName = m[1].trim();
+  const goalName = m[2].trim();
+
+  // Find project by name
+  const projects = await queryDb(projectsDbId, {
+    property: 'Name', title: { contains: projectName },
+  });
+  if (!projects.length) return sendTelegram(chatId, `❌ Project not found: <b>${projectName}</b>\nCheck spelling or use <code>show tasks</code> to list projects.`);
+
+  // Find goal by name (to verify it exists)
+  const goals = await queryDb(goalsDbId, {
+    property: 'Name', title: { contains: goalName },
+  });
+  if (!goals.length) return sendTelegram(chatId, `❌ Goal not found: <b>${goalName}</b>\nAdd it first with: <code>add goal: ${goalName} q2</code>`);
+
+  const projectPage = projects[0];
+  const matchedGoal = goals[0];
+  const matchedGoalName = matchedGoal.properties?.Name?.title?.[0]?.plain_text || goalName;
+
+  // Update the project's Goal field
+  await fetch(`https://api.notion.com/v1/pages/${projectPage.id}`, {
+    method: 'PATCH',
+    headers: NOTION_HEADERS(),
+    body: JSON.stringify({
+      properties: {
+        Goal: { rich_text: [{ text: { content: matchedGoalName } }] },
+      },
+    }),
+  });
+
+  const projectTitle = projectPage.properties?.Name?.title?.[0]?.plain_text || projectName;
+  return sendTelegram(chatId, `🔗 <b>Linked</b>\n📁 ${projectTitle} → 🎯 ${matchedGoalName}`);
+}
+
 async function handlePlanMyWeek(chatId) {
   const { tasks: tasksDbId, projects: projectsDbId } = dbIds();
   if (!tasksDbId || !projectsDbId) return sendTelegram(chatId, missingDbMsg('Tasks/Projects'));
@@ -373,7 +415,8 @@ function helpMessage() {
     `🎯 <code>focus today</code> or <code>what's my focus</code>\n` +
     `✅ <code>done: [task name]</code>\n` +
     `📋 <code>show tasks</code>\n` +
-    `🔨 <code>break down: [goal/project name]</code>\n\n` +
+    `🔨 <code>break down: [goal/project name]</code>\n` +
+    `🔗 <code>link project: [name] to goal: [goal name]</code>\n\n` +
     `<a href="https://ooppyy-intel-agent.vercel.app/api/plan">Planning HQ →</a>`;
 }
 
@@ -408,6 +451,8 @@ export default async function handler(req, res) {
         await handleAddProject(chatId, text);
       } else if (/^add\s+goal:/i.test(text)) {
         await handleAddGoal(chatId, text);
+      } else if (/^link\s+project:/i.test(text)) {
+        await handleLinkProject(chatId, text);
       } else if (/plan\s+my\s+week/i.test(text)) {
         await handlePlanMyWeek(chatId);
       } else if (/focus\s+today|what'?s?\s+my\s+focus/i.test(text)) {
