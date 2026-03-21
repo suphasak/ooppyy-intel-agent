@@ -12,8 +12,8 @@ export default async function handler(req, res) {
     }
 
     const briefNum = await getNextBriefNumber();
-    const news = await fetchAllNews();
-    const briefData = await generateBrief(news, briefNum);
+    const { results: news, activeSources } = await fetchAllNews();
+    const briefData = await generateBrief(news, activeSources, briefNum);
     await Promise.all([
       sendToTelegram(briefData),
       saveToNotion(briefData),
@@ -55,12 +55,27 @@ async function getNextBriefNumber() {
 }
 
 const FEEDS = [
+  // WORLD & POLITICS — geo-balanced
   { category: 'WORLD & POLITICS', emoji: '🌍', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC World' },
+  { category: 'WORLD & POLITICS', emoji: '🌍', url: 'https://feeds.reuters.com/reuters/worldNews', source: 'Reuters World' },
+  { category: 'WORLD & POLITICS', emoji: '🌍', url: 'https://www.aljazeera.com/xml/rss/all.xml', source: 'Al Jazeera' },
+  { category: 'WORLD & POLITICS', emoji: '🌍', url: 'https://www.scmp.com/rss/2/feed', source: 'SCMP' },
+
+  // MARKETS & ECONOMICS
   { category: 'MARKETS & ECONOMICS', emoji: '📈', url: 'https://feeds.bbci.co.uk/news/business/rss.xml', source: 'BBC Business' },
-  { category: 'TECHNOLOGY & AI', emoji: '💻', url: 'https://feeds.bbci.co.uk/news/technology/rss.xml', source: 'BBC Tech' },
+  { category: 'MARKETS & ECONOMICS', emoji: '📈', url: 'https://feeds.reuters.com/reuters/businessNews', source: 'Reuters Business' },
+  { category: 'MARKETS & ECONOMICS', emoji: '📈', url: 'https://asia.nikkei.com/rss/feed/nar', source: 'Nikkei Asia' },
+
+  // TECHNOLOGY & AI
   { category: 'TECHNOLOGY & AI', emoji: '💻', url: 'https://techcrunch.com/feed/', source: 'TechCrunch' },
+  { category: 'TECHNOLOGY & AI', emoji: '💻', url: 'https://www.theverge.com/rss/index.xml', source: 'The Verge' },
+  { category: 'TECHNOLOGY & AI', emoji: '💻', url: 'https://restofworld.org/feed/latest', source: 'Rest of World' },
+
+  // FASHION & BEAUTY — trade press focus
   { category: 'FASHION & BEAUTY', emoji: '👗', url: 'https://wwd.com/feed/', source: 'WWD' },
   { category: 'FASHION & BEAUTY', emoji: '👗', url: 'https://fashionunited.com/rss/news', source: 'FashionUnited' },
+  { category: 'FASHION & BEAUTY', emoji: '👗', url: 'https://www.businessoffashion.com/feeds/news', source: 'Business of Fashion' },
+  { category: 'FASHION & BEAUTY', emoji: '👗', url: 'https://fashionnetwork.com/rss/news,1.rss', source: 'FashionNetwork' },
 ];
 
 function parseRSS(xml, sourceName) {
@@ -85,6 +100,7 @@ function parseRSS(xml, sourceName) {
 
 async function fetchAllNews() {
   const results = {};
+  const activeSources = [];
   await Promise.all(FEEDS.map(async (feed) => {
     try {
       const r = await fetch(feed.url, {
@@ -94,15 +110,18 @@ async function fetchAllNews() {
       if (r.ok) {
         const xml = await r.text();
         const items = parseRSS(xml, feed.source);
-        if (!results[feed.category]) results[feed.category] = { emoji: feed.emoji, items: [] };
-        results[feed.category].items.push(...items);
+        if (items.length) {
+          if (!results[feed.category]) results[feed.category] = { emoji: feed.emoji, items: [] };
+          results[feed.category].items.push(...items);
+          activeSources.push(feed.source);
+        }
       }
     } catch (e) { /* feed failed, skip */ }
   }));
-  return results;
+  return { results, activeSources };
 }
 
-async function generateBrief(news, briefNum) {
+async function generateBrief(news, activeSources, briefNum) {
   const date = new Date().toLocaleDateString('en-SG', {
     timeZone: 'Asia/Singapore',
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
@@ -112,18 +131,39 @@ async function generateBrief(news, briefNum) {
   for (const [category, { items }] of Object.entries(news)) {
     if (!items.length) continue;
     newsContext += `\n\n${category}:\n`;
-    items.slice(0, 4).forEach((item, i) => {
-      newsContext += `${i + 1}. ${item.title}\n`;
+    items.slice(0, 6).forEach((item, i) => {
+      newsContext += `${i + 1}. [${item.source}] ${item.title}\n`;
       if (item.url) newsContext += `   URL: ${item.url}\n`;
       if (item.description) newsContext += `   Context: ${item.description}\n`;
     });
   }
 
   const prompt = `You are Ooppyy, a sharp intelligence analyst. Today is ${date}.
+Sources active today: ${activeSources.join(', ')}.
 
-Here are today's headlines:${newsContext}
+Below are headlines from ${activeSources.length} sources across different geographies and perspectives:
+${newsContext}
 
-Output ONLY valid JSON (no markdown, no text before or after). Use exactly this structure:
+Your job has THREE steps before writing the brief:
+
+STEP 1 — CROSS-SOURCE VIRALITY
+Group stories that cover the same underlying event across multiple sources. A story covered by 3+ sources scores virality 8-10. Covered by 2 sources: 6-7. Single source: 4-5. Prioritise multi-source stories — they are confirmed, widely discussed facts.
+
+STEP 2 — BIAS FILTER
+For each story, evaluate its framing:
+- Is it factual reporting or opinion/spin?
+- Does it reflect a specific political, cultural, or geographic bias?
+- Extract ONLY the factual core. Strip editorial framing, loaded language, and subjective interpretation.
+- If a story is >70% opinion with no verifiable facts, discard it entirely.
+- If bias exists but facts are present, note it briefly in bias_flag.
+
+STEP 3 — RELEVANCE SCORING
+Score relevance 1-10 for this reader's context:
+- Fashion/beauty distributor operating in SEA, India, GCC (brands: footwear, apparel, innerwear, sportswear)
+- AI consulting agency based in Singapore
+- Interested in: market movements, distribution deals, consumer trends, trade policy, FX/inflation impact on retail
+
+Output ONLY valid JSON (no markdown, no text before or after):
 
 {
   "date": "${date}",
@@ -135,11 +175,12 @@ Output ONLY valid JSON (no markdown, no text before or after). Use exactly this 
       "color": "#0ea5e9",
       "stories": [
         {
-          "headline": "Story headline in 1 sentence",
-          "source_url": "paste exact URL from above or empty string",
+          "headline": "Factual headline stripped of bias, 1 sentence",
+          "source_url": "exact URL from above or empty string",
           "source_name": "Publication name",
-          "sowhat": "ONE sentence — implication for fashion/beauty in SEA/India/GCC or AI consulting SG",
-          "virality": 8
+          "sowhat": "ONE sentence — implication for fashion/beauty SEA/India/GCC or AI consulting SG",
+          "virality": 8,
+          "bias_flag": "UK-centric framing noted"
         }
       ]
     },
@@ -148,21 +189,21 @@ Output ONLY valid JSON (no markdown, no text before or after). Use exactly this 
       "label": "MARKETS & ECONOMICS",
       "emoji": "📈",
       "color": "#22c55e",
-      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":7}]
+      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":7,"bias_flag":""}]
     },
     {
       "key": "tech",
       "label": "TECHNOLOGY & AI",
       "emoji": "💻",
       "color": "#a855f7",
-      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":6}]
+      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":6,"bias_flag":""}]
     },
     {
       "key": "fashion",
       "label": "FASHION & BEAUTY",
       "emoji": "👗",
       "color": "#ec4899",
-      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":5}]
+      "stories": [{"headline":"...","source_url":"...","source_name":"...","sowhat":"...","virality":5,"bias_flag":""}]
     }
   ],
   "opportunities": [
@@ -172,10 +213,11 @@ Output ONLY valid JSON (no markdown, no text before or after). Use exactly this 
 }
 
 Rules:
-- 2 stories per section (8 total)
-- sowhat is ONE sentence max
+- 2 stories per section (8 total), ranked by virality × relevance
+- Prefer multi-source confirmed stories over single-source
+- sowhat is ONE sentence max, must be relevant to the reader above
 - source_url must be a real URL from above, or ""
-- virality 1-10: global impact + market relevance + how widely discussed today
+- bias_flag: brief note if framing detected, empty string if neutral
 - Output raw JSON only, nothing else`;
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -207,7 +249,7 @@ Rules:
   parsed.agentVersion = AGENT_VERSION;
   parsed.agentName = AGENT_NAME;
   parsed.generatedAt = new Date().toISOString();
-  parsed.sourcesUsed = ['BBC World', 'BBC Business', 'BBC Tech', 'TechCrunch', 'WWD', 'FashionUnited'];
+  parsed.sourcesUsed = activeSources;
   return parsed;
 }
 

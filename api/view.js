@@ -171,6 +171,7 @@ function renderHTML(data, recentHighlights, dateTabs) {
             <div class="sowhat-label">💡 So What</div>
             <div class="sowhat-body">${e(story.sowhat)}</div>
           </div>
+          ${story.bias_flag ? `<div class="bias-flag">⚠️ ${e(story.bias_flag)}</div>` : ''}
         </div>
       </div>`).join('');
 
@@ -336,6 +337,9 @@ function renderHTML(data, recentHighlights, dateTabs) {
     .opp-row:last-child{border-bottom:none}
     .opp-dot{min-width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 5px rgba(245,158,11,.5);margin-top:6px;flex-shrink:0}
     .opp-text{font-size:.86rem;line-height:1.5;color:var(--txt)}
+
+    /* BIAS FLAG */
+    .bias-flag{font-size:.68rem;color:#f59e0b;background:rgba(245,158,11,.08);border-radius:6px;padding:4px 8px;margin-bottom:8px;line-height:1.4}
 
     /* FOOTER */
     .footer{padding:16px;text-align:center;color:var(--txt2);font-size:.72rem;line-height:1.7}
