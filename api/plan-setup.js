@@ -43,6 +43,25 @@ export default async function handler(req, res) {
     const hqPageId = hqPage.id;
     const hqPageUrl = hqPage.url;
 
+    // ── 1.5. Create Mission page ─────────────────────────────────────────────
+    const missionRes = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: notionHeaders,
+      body: JSON.stringify({
+        parent: { page_id: hqPageId },
+        icon: { type: 'emoji', emoji: '🎯' },
+        properties: {
+          title: { title: [{ text: { content: 'Set your mission via Telegram: set mission: [your mission]' } }] },
+        },
+      }),
+    });
+    if (!missionRes.ok) {
+      const err = await missionRes.json();
+      throw new Error(`Failed to create Mission page: ${JSON.stringify(err)}`);
+    }
+    const missionPage = await missionRes.json();
+    const missionPageId = missionPage.id;
+
     // ── 2. Create Goals database ─────────────────────────────────────────────
     const goalsDbRes = await fetch('https://api.notion.com/v1/databases', {
       method: 'POST',
@@ -52,6 +71,7 @@ export default async function handler(req, res) {
         title: [{ type: 'text', text: { content: '🎯 Goals' } }],
         properties: {
           Name: { title: {} },
+          Code: { rich_text: {} },
           Quarter: {
             select: {
               options: [
@@ -99,6 +119,7 @@ export default async function handler(req, res) {
         title: [{ type: 'text', text: { content: '📁 Projects' } }],
         properties: {
           Name: { title: {} },
+          Code: { rich_text: {} },
           Status: {
             select: {
               options: [
@@ -139,6 +160,7 @@ export default async function handler(req, res) {
         title: [{ type: 'text', text: { content: '✅ Tasks' } }],
         properties: {
           Name: { title: {} },
+          Code: { rich_text: {} },
           Status: {
             select: {
               options: [
@@ -189,7 +211,7 @@ export default async function handler(req, res) {
               rich_text: [{
                 type: 'text',
                 text: {
-                  content: `NOTION_PLANNING_PAGE_ID=${hqPageId}\nNOTION_GOALS_DB_ID=${goalsDbId}\nNOTION_PROJECTS_DB_ID=${projectsDbId}\nNOTION_TASKS_DB_ID=${tasksDbId}`,
+                  content: `NOTION_PLANNING_PAGE_ID=${hqPageId}\nNOTION_MISSION_PAGE_ID=${missionPageId}\nNOTION_GOALS_DB_ID=${goalsDbId}\nNOTION_PROJECTS_DB_ID=${projectsDbId}\nNOTION_TASKS_DB_ID=${tasksDbId}`,
                 },
               }],
             },
@@ -222,9 +244,11 @@ export default async function handler(req, res) {
         goals:    { id: goalsDbId,    url: goalsDb.url },
         projects: { id: projectsDbId, url: projectsDb.url },
         tasks:    { id: tasksDbId,    url: tasksDb.url },
+        mission:  { id: missionPageId },
       },
       envVarsToSet: {
         NOTION_PLANNING_PAGE_ID: hqPageId,
+        NOTION_MISSION_PAGE_ID:  missionPageId,
         NOTION_GOALS_DB_ID:      goalsDbId,
         NOTION_PROJECTS_DB_ID:   projectsDbId,
         NOTION_TASKS_DB_ID:      tasksDbId,

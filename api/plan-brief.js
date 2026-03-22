@@ -1,6 +1,7 @@
 export default async function handler(req, res) {
   try {
     const NOTION_TOKEN    = process.env.NOTION_TOKEN;
+    const MISSION_PAGE_ID = process.env.NOTION_MISSION_PAGE_ID;
     const TASKS_DB_ID     = process.env.NOTION_TASKS_DB_ID;
     const PROJECTS_DB_ID  = process.env.NOTION_PROJECTS_DB_ID;
     const GROQ_API_KEY    = process.env.GROQ_API_KEY;
@@ -18,6 +19,22 @@ export default async function handler(req, res) {
       'Content-Type': 'application/json',
       'Notion-Version': '2022-06-28',
     };
+
+    // ── Fetch mission ─────────────────────────────────────────────────────────
+    let mission = '';
+    if (NOTION_TOKEN && MISSION_PAGE_ID) {
+      try {
+        const mRes = await fetch(`https://api.notion.com/v1/pages/${MISSION_PAGE_ID}`, {
+          headers: notionHeaders,
+        });
+        if (mRes.ok) {
+          const mData = await mRes.json();
+          mission = mData.properties?.title?.title?.[0]?.plain_text || '';
+        }
+      } catch (err) {
+        console.error('Mission fetch error:', err.message);
+      }
+    }
 
     const now     = sgNow();
     const today   = isoDate(now);
@@ -65,7 +82,7 @@ export default async function handler(req, res) {
     // ── Groq AI brief ────────────────────────────────────────────────────────
     let aiTake = '';
     if (GROQ_API_KEY && candidateTasks.length + overdueTasks.length > 0) {
-      const prompt = `You are Ooppyy, a sharp and witty Chief of Staff. Write a 1-2 sentence evening planning insight about tomorrow's priorities. Be direct, a little sarcastic, no fluff.\n\nTomorrow's tasks: ${tomorrowLines}\nOverdue: ${overdueLines}\nProjects: ${projectLines}\n\nRespond with plain text only, max 2 sentences.`;
+      const prompt = `You are Ooppyy, a sharp and witty Chief of Staff. Write a 1-2 sentence evening planning insight about tomorrow's priorities. Be direct, a little sarcastic, no fluff.\n\nYour mission: "${mission || 'Not set yet'}". Tomorrow's tasks: ${tomorrowLines}\nOverdue: ${overdueLines}\nProjects: ${projectLines}\n\nRespond with plain text only, max 2 sentences.`;
       try {
         const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
@@ -93,6 +110,7 @@ export default async function handler(req, res) {
     const top3 = candidateTasks.slice(0, 3);
 
     let msg = `🌙 <b>Planning Brief · ${shortDate} · 9pm SGT</b>\n`;
+    if (mission) msg += `🎯 ${e(mission)}\n`;
 
     if (top3.length) {
       msg += `\n📌 <b>Tomorrow's Focus (top ${top3.length})</b>\n`;

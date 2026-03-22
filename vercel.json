@@ -22,6 +22,10 @@
     {
       "path": "/api/plan-brief",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/morning-brief",
+      "schedule": "30 23 * * *"
     }
   ]
 }
