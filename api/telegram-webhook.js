@@ -680,6 +680,41 @@ function helpMessage() {
     `<a href="https://ooppyy-intel-agent.vercel.app/api/plan">Planning HQ →</a>`;
 }
 
+// ── Strategist (free-form AI) ─────────────────────────────────────────────────
+
+async function handleStrategist(chatId, text) {
+  // Pull mission + active goals for context
+  let mission = '';
+  let goalsSummary = '';
+  try {
+    mission = await getMission();
+  } catch (e) { /* non-fatal */ }
+  try {
+    const { goals: goalsDbId } = dbIds();
+    if (goalsDbId) {
+      const goals = await queryDb(goalsDbId, {});
+      const active = goals.filter(g => g.properties?.Status?.select?.name === 'Active');
+      goalsSummary = active.map(g => propTitle(g)).join(', ');
+    }
+  } catch (e) { /* non-fatal */ }
+
+  const context = [
+    mission ? 'Mission: ' + mission : '',
+    goalsSummary ? 'Active goals: ' + goalsSummary : '',
+  ].filter(Boolean).join('\n');
+
+  const systemContext = context
+    ? `You know this about the user:\n${context}\n\n`
+    : '';
+
+  const prompt = `${systemContext}You are Ooppyy — a sharp, direct, slightly sarcastic Chief of Staff and second-opinion strategist. You give real, opinionated advice. No fluff, no "great question!", no bullet-point padding. Be concise but complete. Use plain text only — no markdown bold, no asterisks, no hashtags. Short paragraphs are fine.\n\nUser: ${text}`;
+
+  await sendTelegram(chatId, '⏳ thinking...');
+
+  const reply = await groq(prompt);
+  await sendTelegram(chatId, reply, 'HTML');
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -734,7 +769,7 @@ export default async function handler(req, res) {
       } else if (/^\/?(start|help)$/i.test(lower)) {
         await sendTelegram(chatId, helpMessage());
       } else {
-        await sendTelegram(chatId, helpMessage());
+        await handleStrategist(chatId, text);
       }
     } catch (cmdErr) {
       console.error('Command error:', cmdErr);
